@@ -2,6 +2,11 @@ import os
 import requests
 from datetime import datetime, timezone
 
+
+# =========================
+# CONFIG
+# =========================
+
 BASE_URL = "https://api.sharkexchange.in"
 PAIR = "BTCUSDT"
 
@@ -9,37 +14,69 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 
+# =========================
+# API HELPER
+# =========================
+
 def get_json(url, method="GET", payload=None):
     if method == "POST":
-        response = requests.post(url, json=payload, timeout=20)
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=20
+        )
     else:
-        response = requests.get(url, timeout=20)
+        response = requests.get(
+            url,
+            timeout=20
+        )
 
     response.raise_for_status()
     return response.json()
 
 
+# =========================
+# MARKET DATA
+# =========================
+
 def get_ticker():
     data = get_json(
         f"{BASE_URL}/v1/market/ticker24Hr/{PAIR}"
     )
-    return data.get("data", data)
+
+    if isinstance(data, dict):
+        return data.get("data", data)
+
+    return {}
 
 
 def get_depth():
     data = get_json(
         f"{BASE_URL}/v1/market/depth/{PAIR}"
     )
-    return data.get("data", data)
+
+    if isinstance(data, dict):
+        return data.get("data", data)
+
+    return {}
 
 
 def get_trades():
     data = get_json(
         f"{BASE_URL}/v1/market/aggTrade/{PAIR}"
     )
-    return data if isinstance(data, list) else data.get("data", [])
+
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        return data.get("data", [])
+
+    return []
+
 
 def get_klines(interval, limit=20):
+
     payload = {
         "pair": PAIR,
         "interval": interval,
@@ -52,18 +89,36 @@ def get_klines(interval, limit=20):
         payload=payload
     )
 
-    return data if isinstance(data, list) else data.get("data", [])
+    # Shark API may return a raw list
+    if isinstance(data, list):
+        return data
 
+    # Or a dictionary containing data
+    if isinstance(data, dict):
+        return data.get("data", [])
+
+    return []
+
+
+# =========================
+# TRADE FLOW
+# =========================
 
 def calculate_trade_flow(trades):
+
     buy_volume = 0.0
     sell_volume = 0.0
 
     for trade in trades:
-        quantity = float(trade.get("q", 0))
 
-        # m=true means buyer is market maker.
-        # Therefore aggressive seller volume is represented here.
+        try:
+            quantity = float(trade.get("q", 0))
+        except (ValueError, TypeError):
+            quantity = 0.0
+
+        # m=True:
+        # buyer is market maker
+        # therefore aggressive side is seller
         if trade.get("m") is True:
             sell_volume += quantity
         else:
@@ -74,75 +129,154 @@ def calculate_trade_flow(trades):
     return buy_volume, sell_volume, delta
 
 
+# =========================
+# ORDER BOOK
+# =========================
+
 def calculate_orderbook(depth):
+
+    if not isinstance(depth, dict):
+        return 0.0, 0.0, 0.0
+
     bids = depth.get("b", [])
     asks = depth.get("a", [])
 
-    bid_volume = sum(float(x[1]) for x in bids)
-    ask_volume = sum(float(x[1]) for x in asks)
+    bid_volume = 0.0
+    ask_volume = 0.0
+
+    for item in bids:
+
+        try:
+            bid_volume += float(item[1])
+        except (ValueError, TypeError, IndexError):
+            pass
+
+    for item in asks:
+
+        try:
+            ask_volume += float(item[1])
+        except (ValueError, TypeError, IndexError):
+            pass
 
     total = bid_volume + ask_volume
 
     if total > 0:
-        imbalance = ((bid_volume - ask_volume) / total) * 100
+        imbalance = (
+            (bid_volume - ask_volume) / total
+        ) * 100
     else:
-        imbalance = 0
+        imbalance = 0.0
 
     return bid_volume, ask_volume, imbalance
 
 
+# =========================
+# TREND
+# =========================
+
 def candle_trend(klines):
+
+    if not isinstance(klines, list):
+        return "UNKNOWN"
+
     if len(klines) < 2:
         return "UNKNOWN"
 
-    previous = float(klines[-2]["close"])
-    current = float(klines[-1]["close"])
+    try:
+
+        previous = float(
+            klines[-2]["close"]
+        )
+
+        current = float(
+            klines[-1]["close"]
+        )
+
+    except (KeyError, TypeError, ValueError):
+
+        return "UNKNOWN"
 
     if current > previous:
         return "BULLISH"
+
     elif current < previous:
         return "BEARISH"
-    else:
-        return "FLAT"
+
+    return "FLAT"
 
 
-def calculate_score(trend15, trend1h, delta, imbalance):
+# =========================
+# AI-STYLE SCORE
+# =========================
+
+def calculate_score(
+    trend15,
+    trend1h,
+    delta,
+    imbalance
+):
+
     score = 50
 
+    # 15 minute trend
     if trend15 == "BULLISH":
         score += 15
+
     elif trend15 == "BEARISH":
         score -= 15
 
+    # 1 hour trend
     if trend1h == "BULLISH":
         score += 15
+
     elif trend1h == "BEARISH":
         score -= 15
 
+    # Trade flow
     if delta > 0:
         score += 10
+
     elif delta < 0:
         score -= 10
 
+    # Order book
     if imbalance > 10:
         score += 10
+
     elif imbalance < -10:
         score -= 10
 
-    return max(0, min(100, score))
+    return max(
+        0,
+        min(100, score)
+    )
 
+
+# =========================
+# SIGNAL
+# =========================
 
 def get_signal(score):
+
     if score >= 65:
         return "🟢 BUY"
+
     elif score <= 35:
         return "🔴 SELL"
-    else:
-        return "⚪ NO TRADE"
 
+    return "⚪ NO TRADE"
+
+
+# =========================
+# TELEGRAM
+# =========================
 
 def send_telegram(message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{BOT_TOKEN}/sendMessage"
+    )
 
     response = requests.post(
         url,
@@ -156,23 +290,56 @@ def send_telegram(message):
     response.raise_for_status()
 
 
+# =========================
+# MAIN
+# =========================
+
 def main():
+
+    # Get market data
     ticker = get_ticker()
     depth = get_depth()
     trades = get_trades()
 
-    klines15 = get_klines("15m", 20)
-    klines1h = get_klines("1h", 20)
+    # Get candles
+    klines15 = get_klines(
+        "15m",
+        20
+    )
 
-    price = float(ticker.get("c", 0))
+    klines1h = get_klines(
+        "1h",
+        20
+    )
 
-    buy_volume, sell_volume, delta = calculate_trade_flow(trades)
+    # BTC price
+    try:
+        price = float(
+            ticker.get("c", 0)
+        )
+    except (ValueError, TypeError):
+        price = 0.0
 
-    bid_volume, ask_volume, imbalance = calculate_orderbook(depth)
+    # Trade flow
+    buy_volume, sell_volume, delta = (
+        calculate_trade_flow(trades)
+    )
 
-    trend15 = candle_trend(klines15)
-    trend1h = candle_trend(klines1h)
+    # Order book
+    bid_volume, ask_volume, imbalance = (
+        calculate_orderbook(depth)
+    )
 
+    # Trends
+    trend15 = candle_trend(
+        klines15
+    )
+
+    trend1h = candle_trend(
+        klines1h
+    )
+
+    # Score
     score = calculate_score(
         trend15,
         trend1h,
@@ -180,49 +347,87 @@ def main():
         imbalance
     )
 
+    # Signal
     signal = get_signal(score)
 
-    now = datetime.now(timezone.utc).strftime(
+    # Time
+    now = datetime.now(
+        timezone.utc
+    ).strftime(
         "%Y-%m-%d %H:%M UTC"
     )
 
+    # Telegram message
     message = f"""
 ₿ BTC AI MONITOR V2
 
 ⏰ {now}
 
-💰 BTCUSDT: ${price:,.2f}
+💰 BTCUSDT
+${price:,.2f}
+
+━━━━━━━━━━━━━━━━━━
 
 📊 TRADE FLOW
-🟢 Buy Volume: {buy_volume:.4f} BTC
-🔴 Sell Volume: {sell_volume:.4f} BTC
-⚖️ Delta: {delta:+.4f} BTC
+
+🟢 Buy Volume
+{buy_volume:.4f} BTC
+
+🔴 Sell Volume
+{sell_volume:.4f} BTC
+
+⚖️ Net Delta
+{delta:+.4f} BTC
+
+━━━━━━━━━━━━━━━━━━
 
 📖 ORDER BOOK
-🟢 Bid Liquidity: {bid_volume:.4f} BTC
-🔴 Ask Liquidity: {ask_volume:.4f} BTC
-⚖️ Imbalance: {imbalance:+.2f}%
+
+🟢 Bid Liquidity
+{bid_volume:.4f} BTC
+
+🔴 Ask Liquidity
+{ask_volume:.4f} BTC
+
+⚖️ Imbalance
+{imbalance:+.2f}%
+
+━━━━━━━━━━━━━━━━━━
 
 📈 TREND
+
 15M: {trend15}
 1H: {trend1h}
 
-🎯 AI SCORE: {score}/100
+━━━━━━━━━━━━━━━━━━
+
+🎯 AI-STYLE SCORE
+
+{score}/100
 
 {signal}
 
+━━━━━━━━━━━━━━━━━━
+
 ⚠️ PAPER / ALERT MODE
+
 No automatic trade execution.
 
-ℹ️ Buy/Sell flow is calculated from the
-recent aggregate-trade sample returned by
-Shark's public API.
+ℹ️ Trade flow represents the
+recent aggregate-trade sample
+returned by Shark's public API.
 """
 
+    # Send Telegram
     send_telegram(message)
 
+    # GitHub log
     print(message)
 
+
+# =========================
+# START
+# =========================
 
 if __name__ == "__main__":
     main()
