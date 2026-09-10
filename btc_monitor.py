@@ -37,8 +37,7 @@ def get_trades():
     data = get_json(
         f"{BASE_URL}/v1/market/aggTrade/{PAIR}"
     )
-    return data.get("data", [])
-
+    return data if isinstance(data, list) else data.get("data", [])
 
 def get_klines(interval, limit=20):
     payload = {
@@ -53,7 +52,7 @@ def get_klines(interval, limit=20):
         payload=payload
     )
 
-    return data.get("data", data)
+    return data if isinstance(data, list) else data.get("data", [])
 
 
 def calculate_trade_flow(trades):
